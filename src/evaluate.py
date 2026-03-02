@@ -156,6 +156,89 @@ def run_experiment(
     return pd.DataFrame(results)
 
 
+# ─── Repeated-seed evaluation (for CI / significance tests) ──────────────────
+
+def run_experiment_repeated(
+    num_samples: int = 100,
+    budget_ratio: float = BUDGET_RATIO,
+    n_runs: int = 30,
+    base_seed: int = 0,
+) -> pd.DataFrame:
+    """
+    Run the experiment n_runs times with different random seeds.
+    Returns a DataFrame with one row per (strategy, run) suitable for
+    bootstrap CI and Wilcoxon tests.
+    """
+    import random as _r
+    rows = []
+    for run_i in range(n_runs):
+        seed = base_seed + run_i
+        _r.seed(seed)
+        samples    = load_samples(n=num_samples)
+        all_chunks = profile_samples(samples)
+        sample_label_map = {s["id"]: s["label"] for s in samples}
+        agent = SLMAuditAgent(mode="mock")
+        for name, selector_fn in STRATEGIES.items():
+            _r.seed(seed)
+            row = _evaluate_strategy(
+                name, selector_fn, all_chunks, sample_label_map,
+                samples, budget_ratio, agent,
+            )
+            row["Run"]  = run_i
+            row["Seed"] = seed
+            rows.append(row)
+    return pd.DataFrame(rows)
+
+
+# ─── Chunk-size ablation ──────────────────────────────────────────────────────
+
+def run_chunk_size_ablation(
+    num_samples: int = 100,
+    budget_ratio: float = BUDGET_RATIO,
+    chunk_sizes: list | None = None,
+    n_runs: int = 10,
+    base_seed: int = 42,
+) -> pd.DataFrame:
+    """
+    Sweep CHUNK_TOKEN_SIZE to study sensitivity of SSG vs baselines.
+    Returns a combined DataFrame with columns: ChunkSize, Strategy, VDR, F1, ...
+    """
+    import src.config as _cfg
+    from src.risk_profiler import profile_samples as _profile
+    import random as _r
+
+    if chunk_sizes is None:
+        chunk_sizes = [40, 60, 80, 100, 120, 160]
+
+    rows = []
+    original_chunk_size = _cfg.CHUNK_TOKEN_SIZE
+
+    for cs in chunk_sizes:
+        _cfg.CHUNK_TOKEN_SIZE = cs
+        # Force fresh profiling by temporarily monkey-patching the config import
+        for run_i in range(n_runs):
+            seed = base_seed + run_i
+            _r.seed(seed)
+            samples    = load_samples(n=num_samples)
+            # Re-profile with new chunk size
+            from src import risk_profiler as _rp
+            all_chunks = _rp.profile_samples(samples)
+            sample_label_map = {s["id"]: s["label"] for s in samples}
+            agent = SLMAuditAgent(mode="mock")
+            for name, selector_fn in STRATEGIES.items():
+                _r.seed(seed)
+                row = _evaluate_strategy(
+                    name, selector_fn, all_chunks, sample_label_map,
+                    samples, budget_ratio, agent,
+                )
+                row["ChunkSize"] = cs
+                row["Run"]       = run_i
+                rows.append(row)
+
+    _cfg.CHUNK_TOKEN_SIZE = original_chunk_size  # restore
+    return pd.DataFrame(rows)
+
+
 # ─── Budget sweep ─────────────────────────────────────────────────────────────
 
 def run_budget_sweep(
