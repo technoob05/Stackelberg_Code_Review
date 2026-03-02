@@ -1,0 +1,58 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.Python
+*.egg
+*.egg-info/
+dist/
+build/
+eggs/
+wheels/
+sdist/
+develop-eggs/
+lib/
+lib64/
+parts/
+var/
+*.manifest
+*.spec
+MANIFEST
+
+# Virtual environments
+.env
+.venv
+venv/
+ENV/
+env/
+env.bak/
+venv.bak/
+
+# Jupyter Notebook checkpoints
+.ipynb_checkpoints/
+
+# Data cache (HuggingFace)
+data/samples_devign_*.json
+data/samples_bigvul_*.json
+
+# Results (keep .gitkeep only)
+results/*.csv
+results/*.png
+
+# IDE / OS
+.vscode/
+.idea/
+*.swp
+*.swo
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Model weights / cache
+*.bin
+*.safetensors
+*.gguf
+*.ggml
+transformers_cache/
+hf_cache/
