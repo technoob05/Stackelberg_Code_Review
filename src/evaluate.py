@@ -121,15 +121,17 @@ def run_experiment(
     num_samples: int = 100,
     budget_ratio: float = BUDGET_RATIO,
     random_seed: int = 42,
+    dataset: str = "devign",
+    agent: SLMAuditAgent | None = None,
 ) -> pd.DataFrame:
     """Run a single experiment at a fixed budget ratio."""
-    print(f"\n--- Experiment  budget={budget_ratio:.0%}  n={num_samples} ---")
+    print(f"\n--- Experiment  dataset={dataset}  budget={budget_ratio:.0%}  n={num_samples} ---")
 
     # Seed Python's random for reproducible mock-agent decisions
     _random.seed(random_seed)
 
     # Load & profile
-    samples    = load_samples(n=num_samples)
+    samples    = load_samples(n=num_samples, dataset=dataset)
     print(f"  Dataset: {get_stats(samples)}")
     all_chunks = profile_samples(samples)
     print(f"  Total chunks: {len(all_chunks)}")
@@ -137,7 +139,8 @@ def run_experiment(
     # Sample-level ground-truth lookup (used in _evaluate_strategy)
     sample_label_map: Dict[int, int] = {s["id"]: s["label"] for s in samples}
 
-    agent   = SLMAuditAgent(mode="mock")
+    if agent is None:
+        agent = SLMAuditAgent(mode="mock")
     results = []
 
     for name, selector_fn in STRATEGIES.items():
@@ -163,6 +166,8 @@ def run_experiment_repeated(
     budget_ratio: float = BUDGET_RATIO,
     n_runs: int = 30,
     base_seed: int = 0,
+    dataset: str = "devign",
+    agent: SLMAuditAgent | None = None,
 ) -> pd.DataFrame:
     """
     Run the experiment n_runs times with different random seeds.
@@ -171,18 +176,18 @@ def run_experiment_repeated(
     """
     import random as _r
     rows = []
+    _agent = agent if agent is not None else SLMAuditAgent(mode="mock")
     for run_i in range(n_runs):
         seed = base_seed + run_i
         _r.seed(seed)
-        samples    = load_samples(n=num_samples)
+        samples    = load_samples(n=num_samples, dataset=dataset)
         all_chunks = profile_samples(samples)
         sample_label_map = {s["id"]: s["label"] for s in samples}
-        agent = SLMAuditAgent(mode="mock")
         for name, selector_fn in STRATEGIES.items():
             _r.seed(seed)
             row = _evaluate_strategy(
                 name, selector_fn, all_chunks, sample_label_map,
-                samples, budget_ratio, agent,
+                samples, budget_ratio, _agent,
             )
             row["Run"]  = run_i
             row["Seed"] = seed
@@ -198,6 +203,8 @@ def run_chunk_size_ablation(
     chunk_sizes: list | None = None,
     n_runs: int = 10,
     base_seed: int = 42,
+    dataset: str = "devign",
+    agent: SLMAuditAgent | None = None,
 ) -> pd.DataFrame:
     """
     Sweep CHUNK_TOKEN_SIZE to study sensitivity of SSG vs baselines.
@@ -219,17 +226,17 @@ def run_chunk_size_ablation(
         for run_i in range(n_runs):
             seed = base_seed + run_i
             _r.seed(seed)
-            samples    = load_samples(n=num_samples)
+            samples    = load_samples(n=num_samples, dataset=dataset)
             # Re-profile with new chunk size
             from src import risk_profiler as _rp
             all_chunks = _rp.profile_samples(samples)
             sample_label_map = {s["id"]: s["label"] for s in samples}
-            agent = SLMAuditAgent(mode="mock")
+            _agent = agent if agent is not None else SLMAuditAgent(mode="mock")
             for name, selector_fn in STRATEGIES.items():
                 _r.seed(seed)
                 row = _evaluate_strategy(
                     name, selector_fn, all_chunks, sample_label_map,
-                    samples, budget_ratio, agent,
+                    samples, budget_ratio, _agent,
                 )
                 row["ChunkSize"] = cs
                 row["Run"]       = run_i
@@ -244,6 +251,8 @@ def run_chunk_size_ablation(
 def run_budget_sweep(
     num_samples: int = 100,
     budget_ratios: List[float] | None = None,
+    dataset: str = "devign",
+    agent: SLMAuditAgent | None = None,
 ) -> pd.DataFrame:
     """
     Sweep over a range of budget ratios and collect VDR / F1 / Efficiency
@@ -255,7 +264,8 @@ def run_budget_sweep(
     print("\n========== Budget Sweep ==========")
     frames = []
     for br in tqdm(budget_ratios, desc="Budget sweep"):
-        df = run_experiment(num_samples=num_samples, budget_ratio=br)
+        df = run_experiment(num_samples=num_samples, budget_ratio=br,
+                            dataset=dataset, agent=agent)
         frames.append(df)
 
     combined = pd.concat(frames, ignore_index=True)

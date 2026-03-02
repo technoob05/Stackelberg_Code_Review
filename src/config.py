@@ -8,7 +8,7 @@ Resource-Constrained Stackelberg Games for Code Review project.
 DATASET_NAME   = "google/bigbench"   # Hugging Face dataset identifier (overridden in data_loader)
 DEVIGN_DATASET = "claudios/Devign"   # Alternative Devign dataset on HF Hub
 # We use a lightweight variant for reproducibility; can be swapped to BigVul:
-USE_DATASET    = "devign"            # "devign" | "bigvul"
+USE_DATASET    = "devign"            # "devign" | "bigvul" | "swebench" | "combined"
 
 NUM_SAMPLES    = 500                 # How many PR samples to use in experiments
 RANDOM_SEED    = 42
