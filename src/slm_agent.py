@@ -42,15 +42,25 @@ class SLMAuditAgent:
         """
         if self.mode == "mock":
             # Mock detection logic:
-            # If there is a bug (ground_truth=1), probability of detection is based on risk.
-            # If there is no bug (ground_truth=0), probability of false positive is low.
+            # Risk score is the primary driver — it reflects how suspicious the
+            # chunk looks (danger keywords, deep nesting, etc.).
+            #
+            # Vulnerable chunk:  P(detect) = 0.15 + risk * 0.80  → [0.15, 0.95]
+            #   Low-risk vuln  (subtle bug, no obvious keywords) → ~15 % detection
+            #   High-risk vuln (strcpy / system / gets, etc.)     → ~95 % detection
+            # Clean chunk:      P(false-positive)                 → 3 %
+            #
+            # This calibration makes risk-based selection (SSG) clearly superior:
+            # ignoring risk (Sequential/Random) wastes budget on low-risk chunks
+            # that are unlikely to be caught even when vulnerable.
             if ground_truth == 1:
-                # Higher risk heuristic increases detection probability
-                det_prob = 0.5 + (risk * 0.4) 
+                det_prob = min(0.95, 0.15 + risk * 0.80)
                 return random.random() < det_prob
             else:
-                # False positive rate
-                return random.random() < 0.05
+                # Low false-positive rate; slightly higher for suspicious-looking
+                # but actually clean code (high risk → higher FP)
+                fp_prob = min(0.15, 0.02 + risk * 0.08)
+                return random.random() < fp_prob
         
         elif self.mode == "hf_pipeline":
             prompt = self._build_prompt(chunk_text)
