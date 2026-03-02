@@ -41,6 +41,18 @@ def _build_threat_vector(chunks: List[Dict]) -> np.ndarray:
     return np.array([c["Ld"] * c["risk"] for c in chunks], dtype=float)
 
 
+def _effective_budget(costs: np.ndarray, budget_ratio: float) -> float:
+    """
+    Compute effective token budget.
+    Floor: always enough to cover at least the cheapest single chunk so that
+    the defender can always review something (avoids VDR=0 on tiny samples).
+    """
+    raw = budget_ratio * float(costs.sum())
+    if len(costs) == 0:
+        return raw
+    return max(raw, float(costs.min()))
+
+
 # ─── Defender LP ─────────────────────────────────────────────────────────────
 
 def solve_defender_lp(
@@ -60,7 +72,7 @@ def solve_defender_lp(
 
     payoff = _build_payoff_vector(chunks)
     costs  = _build_cost_vector(chunks)
-    budget = budget_ratio * costs.sum()
+    budget = _effective_budget(costs, budget_ratio)
 
     # LP:  minimize  -payoff^T p  (linprog minimises)
     # s.t.  costs^T p <= budget
@@ -119,7 +131,7 @@ def solve_stackelberg_minimax(
     Ud     = np.array([c["Ud"] for c in chunks], dtype=float)
     Ld     = np.array([c["Ld"] for c in chunks], dtype=float)
     costs  = _build_cost_vector(chunks)
-    budget = budget_ratio * costs.sum()
+    budget = _effective_budget(costs, budget_ratio)
 
     # Variables: [p_0 .. p_{n-1}, v]  (total = n+1)
     # Objective: maximise v  ->  minimise [-v]
@@ -176,7 +188,7 @@ def select_chunks_ssg(
     """
     p_star, _ = solve_stackelberg_minimax(chunks, budget_ratio)
     costs      = _build_cost_vector(chunks)
-    budget     = budget_ratio * costs.sum()
+    budget     = _effective_budget(costs, budget_ratio)
 
     # Greedy deterministic selection: pick chunks sorted by p_star * Ud * risk
     priority = p_star * np.array([c["Ud"] * c["risk"] for c in chunks])
@@ -199,7 +211,7 @@ def select_chunks_sequential(
 ) -> Tuple[List[Dict], List[float]]:
     """Baseline 1: Read chunks top-to-bottom until budget exhausted."""
     costs  = _build_cost_vector(chunks)
-    budget = budget_ratio * costs.sum()
+    budget = _effective_budget(costs, budget_ratio)
     selected, used = [], 0.0
     for i, c in enumerate(chunks):
         if used + costs[i] <= budget:
@@ -217,7 +229,7 @@ def select_chunks_random(
     import random
     rng    = random.Random(seed)
     costs  = _build_cost_vector(chunks)
-    budget = budget_ratio * costs.sum()
+    budget = _effective_budget(costs, budget_ratio)
     order  = list(range(len(chunks)))
     rng.shuffle(order)
     selected, used = [], 0.0

@@ -14,7 +14,7 @@ NUM_SAMPLES    = 500                 # How many PR samples to use in experiments
 RANDOM_SEED    = 42
 
 # ─── Risk Profiler ────────────────────────────────────────────────────────────
-CHUNK_TOKEN_SIZE = 250               # Approximate tokens per code chunk
+CHUNK_TOKEN_SIZE = 80                # Approximate tokens per code chunk (keep small so multi-line functions produce ≥2 chunks)
 # Danger keywords that inflate the Ud (reward for catching) score
 DANGER_KEYWORDS = [
     "strcpy", "strcat", "gets", "sprintf", "system(",

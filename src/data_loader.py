@@ -27,58 +27,285 @@ from src.config import RANDOM_SEED, NUM_SAMPLES, USE_DATASET
 CACHE_DIR = Path("data")
 
 # ─── Synthetic fallback data ──────────────────────────────────────────────────
-SYNTHETIC_SAMPLES = [
-    {
-        "id": i,
-        "code": code,
-        "label": label,
-        "project": "synthetic",
+# Each sample is a realistic multi-line C function so the chunker produces
+# ≥ 2 chunks per sample, giving the budget-allocation strategies something
+# meaningful to work with.
+_RAW_SYNTHETIC = [
+    # ── VULNERABLE ──────────────────────────────────────────────────────────
+    (1, """
+void process_input(char *user_input) {
+    char buf[64];
+    int  len;
+    /* BUG: no bounds check before strcpy */
+    strcpy(buf, user_input);
+    len = strlen(buf);
+    printf("Processed %d bytes: %s\n", len, buf);
+    /* further processing ... */
+    buf[0] = toupper(buf[0]);
+    printf("Capitalised: %s\n", buf);
+}
+"""),
+    (0, """
+int vector_dot(const float *a, const float *b, int n) {
+    float sum = 0.0f;
+    int   i;
+    if (!a || !b || n <= 0) return -1;
+    for (i = 0; i < n; i++) {
+        sum += a[i] * b[i];
     }
-    for i, (code, label) in enumerate([
-        ('void vuln(char *src) { char buf[64]; strcpy(buf, src); }', 1),
-        ('int safe_add(int a, int b) { return a + b; }', 0),
-        ('void exec_cmd(char *cmd) { system(cmd); }', 1),
-        ('int max(int a, int b) { return a > b ? a : b; }', 0),
-        ('char *get_user_input() { char *buf = malloc(256); gets(buf); return buf; }', 1),
-        ('size_t strlen_safe(const char *s) { if (!s) return 0; return strlen(s); }', 0),
-        ('void log_msg(char *fmt, char *msg) { char buf[128]; sprintf(buf, fmt, msg); }', 1),
-        ('void swap(int *a, int *b) { int t = *a; *a = *b; *b = t; }', 0),
-        ('void sql_query(char *user) { char q[256]; sprintf(q, "SELECT * FROM users WHERE name=\'%s\'", user); }', 1),
-        ('int clamp(int v, int lo, int hi) { return v < lo ? lo : v > hi ? hi : v; }', 0),
-        ('void deserialize(char *data) { pickle_loads(data); }', 1),
-        ('float avg(float *arr, int n) { float s = 0; for(int i=0;i<n;i++) s+=arr[i]; return s/n; }', 0),
-        ('void copy_buf(char *dst, char *src, int len) { memcpy(dst, src, len+1); }', 1),
-        ('bool is_even(int n) { return n % 2 == 0; }', 0),
-        ('void auth(char *token) { jwt_decode(token, NULL, NULL); }', 1),
-        ('int gcd(int a, int b) { return b ? gcd(b, a%b) : a; }', 0),
-        ('void run(char *cmd) { exec(cmd); }', 1),
-        ('int factorial(int n) { return n <= 1 ? 1 : n * factorial(n-1); }', 0),
-        ('void free_and_use(int *p) { free(p); *p = 42; }', 1),
-        ('void print_greeting(const char *name) { printf("Hello, %s!\\n", name); }', 0),
-    ] * 25   # repeat to have enough samples
-    )
+    return (int)sum;
+}
+"""),
+    (1, """
+void exec_shell(char *cmd, char *arg) {
+    char full[256];
+    /* BUG: sprintf with user-controlled format string */
+    sprintf(full, cmd, arg);
+    system(full);
+    printf("Command executed\n");
+}
+"""),
+    (0, """
+char *str_join(const char *a, const char *b) {
+    size_t la = strlen(a), lb = strlen(b);
+    char  *out = malloc(la + lb + 1);
+    if (!out) return NULL;
+    memcpy(out,      a, la);
+    memcpy(out + la, b, lb);
+    out[la + lb] = '\0';
+    return out;
+}
+"""),
+    (1, """
+void read_config(const char *path) {
+    FILE *fp = fopen(path, "r");
+    char  line[128];
+    char  key[64], val[64];
+    if (!fp) return;
+    /* BUG: gets() inside loop — unbounded read */
+    while (gets(line)) {
+        sscanf(line, "%s = %s", key, val);
+        printf("  %s -> %s\n", key, val);
+    }
+    fclose(fp);
+}
+"""),
+    (0, """
+void insertion_sort(int *arr, int n) {
+    int i, j, key;
+    for (i = 1; i < n; i++) {
+        key = arr[i];
+        j   = i - 1;
+        while (j >= 0 && arr[j] > key) {
+            arr[j + 1] = arr[j];
+            j--;
+        }
+        arr[j + 1] = key;
+    }
+}
+"""),
+    (1, """
+void db_login(char *username, char *password) {
+    char query[512];
+    /* BUG: SQL injection — user input directly interpolated */
+    sprintf(query,
+        "SELECT id FROM users WHERE username='%s' AND password='%s'",
+        username, password);
+    db_exec(query);
+    log_msg("Login attempt for user: %s", username);
+}
+"""),
+    (0, """
+int binary_search(const int *arr, int n, int target) {
+    int lo = 0, hi = n - 1, mid;
+    while (lo <= hi) {
+        mid = lo + (hi - lo) / 2;
+        if      (arr[mid] == target) return mid;
+        else if (arr[mid]  < target) lo = mid + 1;
+        else                         hi = mid - 1;
+    }
+    return -1;
+}
+"""),
+    (1, """
+void deserialize_payload(char *raw, size_t len) {
+    struct Payload *p = malloc(sizeof(struct Payload));
+    /* BUG: memcpy with attacker-controlled len+1 (off-by-one) */
+    memcpy(p->data, raw, len + 1);
+    p->checksum = crc32(p->data, len);
+    process_payload(p);
+    free(p);
+}
+"""),
+    (0, """
+float matrix_trace(float **m, int n) {
+    float trace = 0.0f;
+    int   i;
+    if (!m || n <= 0) return 0.0f;
+    for (i = 0; i < n; i++) {
+        if (!m[i]) continue;
+        trace += m[i][i];
+    }
+    return trace;
+}
+"""),
+    (1, """
+char *build_redirect(char *host, char *path) {
+    char url[256];
+    /* BUG: no validation — open redirect + buffer overflow */
+    sprintf(url, "http://%s%s", host, path);
+    char *tok = jwt_decode(url, NULL, NULL);
+    return strdup(tok ? tok : url);
+}
+"""),
+    (0, """
+void trim_whitespace(char *s) {
+    char *start = s;
+    char *end;
+    if (!s || !*s) return;
+    while (isspace((unsigned char)*start)) start++;
+    memmove(s, start, strlen(start) + 1);
+    end = s + strlen(s) - 1;
+    while (end > s && isspace((unsigned char)*end)) *(end--) = '\0';
+}
+"""),
+    (1, """
+void auth_token(const char *token) {
+    char decoded[512];
+    /* BUG: no signature verification on JWT */
+    jwt_decode(token, decoded, NULL);
+    if (strncmp(decoded, "admin", 5) == 0) {
+        grant_root_access();
+    }
+    log_access(decoded);
+}
+"""),
+    (0, """
+int safe_multiply(long a, long b, long *out) {
+    if (a != 0 && b > LONG_MAX / a) {
+        return -1;  /* overflow */
+    }
+    *out = a * b;
+    return 0;
+}
+"""),
+    (1, """
+void load_plugin(char *name) {
+    char path[256];
+    void *handle;
+    /* BUG: no path sanitisation — directory traversal */
+    snprintf(path, sizeof(path), "/plugins/%s.so", name);
+    handle = dlopen(path, RTLD_NOW);
+    if (!handle) {
+        fprintf(stderr, "dlopen error: %s\n", dlerror());
+    }
+    /* exec plugin entry point */
+    void (*init)() = dlsym(handle, "plugin_init");
+    if (init) init();
+}
+"""),
+    (0, """
+uint32_t fnv1a_hash(const void *data, size_t len) {
+    const uint8_t *p    = (const uint8_t *)data;
+    uint32_t       hash = 2166136261u;
+    size_t         i;
+    for (i = 0; i < len; i++) {
+        hash ^= p[i];
+        hash *= 16777619u;
+    }
+    return hash;
+}
+"""),
+    (1, """
+void handle_request(int sock) {
+    char buf[1024];
+    int  n;
+    /* BUG: recv result not bounds-checked before eval()-style dispatch */
+    n = recv(sock, buf, sizeof(buf), 0);
+    buf[n] = '\0';
+    eval(buf);        /* dangerous eval of untrusted input */
+    send(sock, "OK", 2, 0);
+}
+"""),
+    (0, """
+int parse_int(const char *s, int *out) {
+    char *end;
+    long  val;
+    if (!s || !*s) return -1;
+    errno = 0;
+    val   = strtol(s, &end, 10);
+    if (errno != 0 || *end != '\0') return -1;
+    if (val < INT_MIN || val > INT_MAX)  return -1;
+    *out = (int)val;
+    return 0;
+}
+"""),
+    (1, """
+void run_subprocess(char *cmd) {
+    /* BUG: os.system / subprocess with shell=True equivalent in C */
+    char full_cmd[512];
+    snprintf(full_cmd, sizeof(full_cmd), "bash -c \"%s\"", cmd);
+    FILE *fp = popen(full_cmd, "r");
+    char  line[256];
+    while (fgets(line, sizeof(line), fp)) {
+        fputs(line, stdout);
+    }
+    pclose(fp);
+}
+"""),
+    (0, """
+void linked_list_push(Node **head, int val) {
+    Node *node = malloc(sizeof(Node));
+    if (!node) return;
+    node->val  = val;
+    node->next = *head;
+    *head      = node;
+}
+"""),
+]
+
+# Repeat to fill NUM_SAMPLES
+SYNTHETIC_SAMPLES = [
+    {"id": i % len(_RAW_SYNTHETIC), "code": code, "label": label, "project": "synthetic"}
+    for i, (label, code) in enumerate(_RAW_SYNTHETIC * 30)
+]
+
+
+# Known working Devign dataset variants on HF Hub (tried in order)
+_DEVIGN_HF_NAMES = [
+    ("celinelee/devign",  "train", "func",   "target"),
+    ("mr-abims0/devign",  "train", "func",   "target"),
+    ("d4n1/Devign",       "train", "func",   "target"),
 ]
 
 
 def _load_devign_hf(n: int) -> List[Dict]:
-    """Load from HuggingFace Hub (claudios/Devign)."""
-    ds = load_dataset("claudios/Devign", split="train", trust_remote_code=True)
+    """Try each known Devign variant on HF Hub; return first that works."""
     rng = random.Random(RANDOM_SEED)
-    indices = rng.sample(range(len(ds)), min(n, len(ds)))
-    samples = []
-    for idx, row in enumerate(ds.select(indices)):
-        samples.append({
-            "id": idx,
-            "code": row.get("func", row.get("code", "")),
-            "label": int(row.get("target", row.get("label", 0))),
-            "project": row.get("project", "unknown"),
-        })
-    return samples
+    for ds_name, split, code_col, label_col in _DEVIGN_HF_NAMES:
+        try:
+            ds = load_dataset(ds_name, split=split)
+            indices = rng.sample(range(len(ds)), min(n, len(ds)))
+            samples = []
+            for idx, row in enumerate(ds.select(indices)):
+                code = row.get(code_col, row.get("code", ""))
+                lbl  = int(row.get(label_col, row.get("label", 0)))
+                samples.append({
+                    "id":      idx,
+                    "code":    code,
+                    "label":   lbl,
+                    "project": row.get("project", "unknown"),
+                })
+            print(f"[data_loader] Loaded {len(samples)} samples from '{ds_name}'.")
+            return samples
+        except Exception as exc:
+            print(f"[data_loader] '{ds_name}' failed: {exc}")
+    return []
 
 
 def _load_bigvul_hf(n: int) -> List[Dict]:
     """Load from HuggingFace Hub (benjaminjellis/bigvul)."""
-    ds = load_dataset("benjaminjellis/bigvul", split="train", trust_remote_code=True)
+    ds = load_dataset("benjaminjellis/bigvul", split="train")
     rng = random.Random(RANDOM_SEED)
     indices = rng.sample(range(len(ds)), min(n, len(ds)))
     samples = []
