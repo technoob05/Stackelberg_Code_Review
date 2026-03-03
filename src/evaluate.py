@@ -168,23 +168,47 @@ def run_experiment_repeated(
     base_seed: int = 0,
     dataset: str = "devign",
     agent: SLMAuditAgent | None = None,
+    pool_size: int = 500,
 ) -> pd.DataFrame:
     """
-    Run the experiment n_runs times with different random seeds.
-    Returns a DataFrame with one row per (strategy, run) suitable for
-    bootstrap CI and Wilcoxon tests.
+    Run the experiment n_runs times, each time drawing a *fresh random subset*
+    of num_samples from a larger pool.  This guarantees genuine cross-run
+    variance even when the LLM is deterministic.
+
+    Parameters
+    ----------
+    pool_size : int
+        Total samples to download/cache upfront; each run sub-samples
+        num_samples from this pool.  Must be >= num_samples.
     """
     import random as _r
-    rows = []
+
+    pool_size = max(pool_size, num_samples * 3)
+    _r.seed(base_seed)
+    # Load a large pool once (cached as samples_{dataset}_{pool_size}.json)
+    pool   = load_samples(n=pool_size, dataset=dataset)
+    vuln_pool  = [s for s in pool if s["label"] == 1]
+    clean_pool = [s for s in pool if s["label"] == 0]
+    half       = num_samples // 2
+
     _agent = agent if agent is not None else SLMAuditAgent(mode="mock")
+    rows = []
+
     for run_i in range(n_runs):
         seed = base_seed + run_i
         _r.seed(seed)
-        samples    = load_samples(n=num_samples, dataset=dataset)
+        # Draw a *different balanced subset* each run
+        run_vuln  = _r.sample(vuln_pool,  min(half, len(vuln_pool)))
+        run_clean = _r.sample(clean_pool, min(half, len(clean_pool)))
+        run_list  = run_vuln + run_clean
+        _r.shuffle(run_list)
+        # Re-index IDs so sample_label_map is contiguous
+        samples = [dict(s, id=idx) for idx, s in enumerate(run_list)]
         all_chunks = profile_samples(samples)
         sample_label_map = {s["id"]: s["label"] for s in samples}
+
         for name, selector_fn in STRATEGIES.items():
-            _r.seed(seed)
+            _r.seed(seed)   # same seed per strategy → only selection differs
             row = _evaluate_strategy(
                 name, selector_fn, all_chunks, sample_label_map,
                 samples, budget_ratio, _agent,
@@ -192,6 +216,7 @@ def run_experiment_repeated(
             row["Run"]  = run_i
             row["Seed"] = seed
             rows.append(row)
+
     return pd.DataFrame(rows)
 
 
@@ -205,28 +230,40 @@ def run_chunk_size_ablation(
     base_seed: int = 42,
     dataset: str = "devign",
     agent: SLMAuditAgent | None = None,
+    pool_size: int = 500,
 ) -> pd.DataFrame:
     """
     Sweep CHUNK_TOKEN_SIZE to study sensitivity of SSG vs baselines.
+    Each run draws a fresh random subset from a large pool so that
+    cross-run variance is genuine (not zero from a fixed cache).
     Returns a combined DataFrame with columns: ChunkSize, Strategy, VDR, F1, ...
     """
     import src.config as _cfg
-    from src.risk_profiler import profile_samples as _profile
     import random as _r
 
     if chunk_sizes is None:
         chunk_sizes = [40, 60, 80, 100, 120, 160]
+
+    pool_size = max(pool_size, num_samples * 3)
+    _r.seed(base_seed)
+    pool       = load_samples(n=pool_size, dataset=dataset)
+    vuln_pool  = [s for s in pool if s["label"] == 1]
+    clean_pool = [s for s in pool if s["label"] == 0]
+    half       = num_samples // 2
 
     rows = []
     original_chunk_size = _cfg.CHUNK_TOKEN_SIZE
 
     for cs in chunk_sizes:
         _cfg.CHUNK_TOKEN_SIZE = cs
-        # Force fresh profiling by temporarily monkey-patching the config import
         for run_i in range(n_runs):
             seed = base_seed + run_i
             _r.seed(seed)
-            samples    = load_samples(n=num_samples, dataset=dataset)
+            run_list = (
+                _r.sample(vuln_pool,  min(half, len(vuln_pool))) +
+                _r.sample(clean_pool, min(half, len(clean_pool)))
+            )
+            samples = [dict(s, id=idx) for idx, s in enumerate(run_list)]
             # Re-profile with new chunk size
             from src import risk_profiler as _rp
             all_chunks = _rp.profile_samples(samples)

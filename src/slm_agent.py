@@ -45,32 +45,76 @@ except ImportError:
 
 # ─── Prompt templates ─────────────────────────────────────────────────────────
 
-_SYSTEM_PROMPT = (
+_SYSTEM_PROMPT_SECURITY = (
     "You are a senior security engineer performing code review. "
-    "Your task is to identify security vulnerabilities in code snippets. "
+    "Detect security vulnerabilities: buffer overflows, injection flaws, "
+    "use-after-free, integer overflows, authentication bypass, insecure "
+    "deserialization, hard-coded secrets, race conditions, etc. "
     "Be concise and precise."
 )
 
-_USER_TEMPLATE = """\
-Review the following code chunk for security vulnerabilities (buffer overflows, \
-injection flaws, memory corruption, authentication bypass, insecure deserialization, \
-improper error handling, etc.).
+_SYSTEM_PROMPT_DIFF = (
+    "You are an expert software engineer reviewing a code patch. "
+    "Lines starting with '-' are the OLD code being replaced; lines starting "
+    "with '+' are the NEW code. Your task is to decide whether the OLD code "
+    "contains a bug, defect, or security vulnerability that the patch fixes. "
+    "Be concise and precise."
+)
 
-```
+_USER_TEMPLATE_SECURITY = """\
+Review the following code chunk for security vulnerabilities (buffer overflows, \
+injection flaws, memory corruption, authentication bypass, use-after-free, \
+integer overflows, insecure deserialization, hard-coded credentials, etc.).
+
+```c
 {code}
 ```
 
 Answer with exactly ONE of:
-  VULNERABLE: <one-line description of the issue>
+  VULNERABLE: <one-line description of the flaw>
   SAFE: no vulnerability detected
 
 Your answer:"""
 
+_USER_TEMPLATE_DIFF = """\
+The following is a unified diff. Lines starting with '-' are the OLD (potentially \
+buggy/vulnerable) code; lines starting with '+' are the NEW (fixed) code.
+
+Determine whether the OLD code contains a bug, defect, or security vulnerability \
+that this patch addresses.
+
+```diff
+{code}
+```
+
+Answer with exactly ONE of:
+  VULNERABLE: <one-line description of the issue in the old code>
+  SAFE: the old code looks correct
+
+Your answer:"""
+
+
+def _is_diff(code: str) -> bool:
+    """Return True if the code string looks like a unified diff."""
+    first = code.lstrip()[:120]
+    return (
+        first.startswith("diff --git")
+        or first.startswith("---")
+        or first.startswith("@@")
+        or "\n@@" in code[:300]
+    )
+
 
 def _build_chat_messages(code: str) -> List[Dict]:
+    if _is_diff(code):
+        system  = _SYSTEM_PROMPT_DIFF
+        user    = _USER_TEMPLATE_DIFF.format(code=code[:3000])
+    else:
+        system  = _SYSTEM_PROMPT_SECURITY
+        user    = _USER_TEMPLATE_SECURITY.format(code=code[:3000])
     return [
-        {"role": "system", "content": _SYSTEM_PROMPT},
-        {"role": "user",   "content": _USER_TEMPLATE.format(code=code[:3000])},
+        {"role": "system", "content": system},
+        {"role": "user",   "content": user},
     ]
 
 
@@ -191,7 +235,12 @@ class SLMAuditAgent:
             return False
 
         resp_lower = response.lower()
-        return resp_lower.startswith("vulnerable") or "vulnerable:" in resp_lower[:40]
+        return (
+            resp_lower.startswith("vulnerable")
+            or "vulnerable:" in resp_lower[:50]
+            or resp_lower.startswith("yes, vulnerable")
+            or resp_lower.startswith("yes,")
+        )
 
     # ── Public interface ───────────────────────────────────────────────────────
 
