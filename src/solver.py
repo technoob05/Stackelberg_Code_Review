@@ -241,6 +241,73 @@ def select_chunks_random(
     return selected, [1.0] * len(selected)
 
 
+def select_chunks_greedy_value(
+    chunks: List[Dict],
+    budget_ratio: float = BUDGET_RATIO,
+) -> Tuple[List[Dict], List[float]]:
+    """
+    Baseline 3 – Greedy Value-Density (Operations Research knapsack).
+
+    Ranks chunks by value-density = (Ud * risk) / tokens and greedily
+    selects the highest-value-per-token chunks until the budget is
+    exhausted.  This is the classical fractional-knapsack heuristic
+    applied to the same payoff model used by SSG, but WITHOUT
+    adversarial reasoning (no minimax, no attacker model).
+
+    Comparison with SSG isolates the contribution of game-theoretic
+    allocation over a strong non-adversarial optimisation baseline.
+    """
+    costs  = _build_cost_vector(chunks)
+    budget = _effective_budget(costs, budget_ratio)
+
+    # Value-density: benefit per token
+    density = np.array([
+        (c["Ud"] * c["risk"]) / max(1, c["tokens"])
+        for c in chunks
+    ], dtype=float)
+    order = np.argsort(-density)
+
+    selected, used = [], 0.0
+    for idx in order:
+        c = chunks[idx]
+        if used + costs[idx] <= budget:
+            selected.append(c)
+            used += costs[idx]
+    return selected, [1.0] * len(selected)
+
+
+def select_chunks_top_risk(
+    chunks: List[Dict],
+    budget_ratio: float = BUDGET_RATIO,
+) -> Tuple[List[Dict], List[float]]:
+    """
+    Baseline 4 – Top-Risk (static-analysis priority).
+
+    Ranks chunks purely by their heuristic risk score (descending)
+    and greedily selects until the budget is exhausted.  This models
+    a SAST-style approach that triages by suspiciousness without any
+    payoff modelling, cost-awareness, or adversarial game theory.
+
+    Comparison with SSG isolates the contribution of the full
+    Stackelberg payoff model (Ud, Ld, cost-aware LP) over using
+    raw risk scores alone.
+    """
+    costs  = _build_cost_vector(chunks)
+    budget = _effective_budget(costs, budget_ratio)
+
+    # Sort by risk score only
+    risk_scores = np.array([c["risk"] for c in chunks], dtype=float)
+    order = np.argsort(-risk_scores)
+
+    selected, used = [], 0.0
+    for idx in order:
+        c = chunks[idx]
+        if used + costs[idx] <= budget:
+            selected.append(c)
+            used += costs[idx]
+    return selected, [1.0] * len(selected)
+
+
 if __name__ == "__main__":
     # Quick smoke test
     from src.risk_profiler import profile_code

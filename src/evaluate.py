@@ -25,16 +25,24 @@ from tqdm import tqdm
 
 from src.data_loader import load_samples, get_stats
 from src.risk_profiler import profile_samples
-from src.solver import select_chunks_ssg, select_chunks_sequential, select_chunks_random
+from src.solver import (
+    select_chunks_ssg,
+    select_chunks_sequential,
+    select_chunks_random,
+    select_chunks_greedy_value,
+    select_chunks_top_risk,
+)
 from src.slm_agent import SLMAuditAgent
 from src.config import BUDGET_RATIO, RESULTS_FILE, RESULTS_DIR
 
 # ─── Strategies registry ──────────────────────────────────────────────────────
 
 STRATEGIES = {
-    "Sequential": select_chunks_sequential,
-    "Random":     select_chunks_random,
-    "SSG":        select_chunks_ssg,
+    "Sequential":   select_chunks_sequential,
+    "Random":       select_chunks_random,
+    "Greedy-Value": select_chunks_greedy_value,
+    "Top-Risk":     select_chunks_top_risk,
+    "SSG":          select_chunks_ssg,
 }
 
 
