@@ -33,7 +33,7 @@ from src.solver import (
     select_chunks_top_risk,
 )
 from src.slm_agent import SLMAuditAgent
-from src.config import BUDGET_RATIO, RESULTS_FILE, RESULTS_DIR
+from src.config import BUDGET_RATIO, RESULTS_FILE, RESULTS_DIR, RISK_MODE
 
 # ─── Strategies registry ──────────────────────────────────────────────────────
 
@@ -131,17 +131,30 @@ def run_experiment(
     random_seed: int = 42,
     dataset: str = "devign",
     agent: SLMAuditAgent | None = None,
+    risk_mode: str | None = None,
+    vuln_ratio: float = 0.50,
 ) -> pd.DataFrame:
-    """Run a single experiment at a fixed budget ratio."""
-    print(f"\n--- Experiment  dataset={dataset}  budget={budget_ratio:.0%}  n={num_samples} ---")
+    """Run a single experiment at a fixed budget ratio.
+
+    Parameters
+    ----------
+    risk_mode : str or None
+        "oracle", "heuristic", or "sast_sim".  None → read from config.
+    vuln_ratio : float
+        Fraction of samples that are vulnerable (0.5 = balanced, 0.1 = realistic).
+    """
+    if risk_mode is None:
+        risk_mode = RISK_MODE
+    print(f"\n--- Experiment  dataset={dataset}  budget={budget_ratio:.0%}  "
+          f"n={num_samples}  risk_mode={risk_mode}  vuln_ratio={vuln_ratio:.0%} ---")
 
     # Seed Python's random for reproducible mock-agent decisions
     _random.seed(random_seed)
 
     # Load & profile
-    samples    = load_samples(n=num_samples, dataset=dataset)
+    samples    = load_samples(n=num_samples, dataset=dataset, vuln_ratio=vuln_ratio)
     print(f"  Dataset: {get_stats(samples)}")
-    all_chunks = profile_samples(samples)
+    all_chunks = profile_samples(samples, risk_mode=risk_mode)
     print(f"  Total chunks: {len(all_chunks)}")
 
     # Sample-level ground-truth lookup (used in _evaluate_strategy)
@@ -177,6 +190,8 @@ def run_experiment_repeated(
     dataset: str = "devign",
     agent: SLMAuditAgent | None = None,
     pool_size: int = 500,
+    risk_mode: str | None = None,
+    vuln_ratio: float = 0.50,
 ) -> pd.DataFrame:
     """
     Run the experiment n_runs times, each time drawing a *fresh random subset*
@@ -188,8 +203,14 @@ def run_experiment_repeated(
     pool_size : int
         Total samples to download/cache upfront; each run sub-samples
         num_samples from this pool.  Must be >= num_samples.
+    risk_mode : str or None
+        "oracle", "heuristic", or "sast_sim".
+    vuln_ratio : float
+        Fraction of samples that are vulnerable (0.5 = balanced, 0.1 = realistic).
     """
     import random as _r
+    if risk_mode is None:
+        risk_mode = RISK_MODE
 
     pool_size = max(pool_size, num_samples * 3)
     _r.seed(base_seed)
@@ -197,7 +218,8 @@ def run_experiment_repeated(
     pool   = load_samples(n=pool_size, dataset=dataset)
     vuln_pool  = [s for s in pool if s["label"] == 1]
     clean_pool = [s for s in pool if s["label"] == 0]
-    half       = num_samples // 2
+    n_vuln = max(1, int(num_samples * vuln_ratio))
+    n_clean = num_samples - n_vuln
 
     _agent = agent if agent is not None else SLMAuditAgent(mode="mock")
     rows = []
@@ -206,13 +228,13 @@ def run_experiment_repeated(
         seed = base_seed + run_i
         _r.seed(seed)
         # Draw a *different balanced subset* each run
-        run_vuln  = _r.sample(vuln_pool,  min(half, len(vuln_pool)))
-        run_clean = _r.sample(clean_pool, min(half, len(clean_pool)))
+        run_vuln  = _r.sample(vuln_pool,  min(n_vuln, len(vuln_pool)))
+        run_clean = _r.sample(clean_pool, min(n_clean, len(clean_pool)))
         run_list  = run_vuln + run_clean
         _r.shuffle(run_list)
         # Re-index IDs so sample_label_map is contiguous
         samples = [dict(s, id=idx) for idx, s in enumerate(run_list)]
-        all_chunks = profile_samples(samples)
+        all_chunks = profile_samples(samples, risk_mode=risk_mode)
         sample_label_map = {s["id"]: s["label"] for s in samples}
 
         for name, selector_fn in STRATEGIES.items():
@@ -239,6 +261,7 @@ def run_chunk_size_ablation(
     dataset: str = "devign",
     agent: SLMAuditAgent | None = None,
     pool_size: int = 500,
+    risk_mode: str | None = None,
 ) -> pd.DataFrame:
     """
     Sweep CHUNK_TOKEN_SIZE to study sensitivity of SSG vs baselines.
@@ -248,6 +271,8 @@ def run_chunk_size_ablation(
     """
     import src.config as _cfg
     import random as _r
+    if risk_mode is None:
+        risk_mode = RISK_MODE
 
     if chunk_sizes is None:
         chunk_sizes = [40, 60, 80, 100, 120, 160]
@@ -275,7 +300,7 @@ def run_chunk_size_ablation(
             # Re-profile with new chunk size — pass explicitly so the
             # import-time default is bypassed.
             from src import risk_profiler as _rp
-            all_chunks = _rp.profile_samples(samples, chunk_tokens=cs)
+            all_chunks = _rp.profile_samples(samples, chunk_tokens=cs, risk_mode=risk_mode)
             sample_label_map = {s["id"]: s["label"] for s in samples}
             _agent = agent if agent is not None else SLMAuditAgent(mode="mock")
             for name, selector_fn in STRATEGIES.items():
@@ -299,6 +324,7 @@ def run_budget_sweep(
     budget_ratios: List[float] | None = None,
     dataset: str = "devign",
     agent: SLMAuditAgent | None = None,
+    risk_mode: str | None = None,
 ) -> pd.DataFrame:
     """
     Sweep over a range of budget ratios and collect VDR / F1 / Efficiency
@@ -311,7 +337,7 @@ def run_budget_sweep(
     frames = []
     for br in tqdm(budget_ratios, desc="Budget sweep"):
         df = run_experiment(num_samples=num_samples, budget_ratio=br,
-                            dataset=dataset, agent=agent)
+                            dataset=dataset, agent=agent, risk_mode=risk_mode)
         frames.append(df)
 
     combined = pd.concat(frames, ignore_index=True)
@@ -320,6 +346,125 @@ def run_budget_sweep(
     combined.to_csv(sweep_file, index=False)
     print(f"Budget sweep saved to {sweep_file}")
     return combined
+
+
+# ─── Risk-mode ablation ──────────────────────────────────────────────────────
+
+def run_risk_mode_ablation(
+    num_samples: int = 100,
+    budget_ratio: float = BUDGET_RATIO,
+    n_runs: int = 30,
+    base_seed: int = 0,
+    dataset: str = "devign",
+    agent: SLMAuditAgent | None = None,
+    pool_size: int = 500,
+) -> pd.DataFrame:
+    """
+    Critical ablation: compare SSG under three risk modes:
+      - "oracle"    – uses ground-truth labels (upper bound, label leakage)
+      - "heuristic" – pure keyword+structural (realistic, no labels)
+      - "sast_sim"  – simulated SAST tool (noisy signal, no direct labels)
+
+    This directly addresses the reviewer concern about label leakage by
+    showing how much of the SSG gain persists without ground-truth info.
+    """
+    import random as _r
+
+    pool_size = max(pool_size, num_samples * 3)
+    _r.seed(base_seed)
+    pool = load_samples(n=pool_size, dataset=dataset)
+    vuln_pool = [s for s in pool if s["label"] == 1]
+    clean_pool = [s for s in pool if s["label"] == 0]
+    half = num_samples // 2
+
+    _agent = agent if agent is not None else SLMAuditAgent(mode="mock")
+    rows = []
+
+    for risk_mode in ["heuristic", "sast_sim", "oracle"]:
+        for run_i in range(n_runs):
+            seed = base_seed + run_i
+            _r.seed(seed)
+            run_vuln = _r.sample(vuln_pool, min(half, len(vuln_pool)))
+            run_clean = _r.sample(clean_pool, min(half, len(clean_pool)))
+            run_list = run_vuln + run_clean
+            _r.shuffle(run_list)
+            samples = [dict(s, id=idx) for idx, s in enumerate(run_list)]
+            all_chunks = profile_samples(samples, risk_mode=risk_mode)
+            sample_label_map = {s["id"]: s["label"] for s in samples}
+
+            for name, selector_fn in STRATEGIES.items():
+                _r.seed(seed)
+                row = _evaluate_strategy(
+                    name, selector_fn, all_chunks, sample_label_map,
+                    samples, budget_ratio, _agent,
+                )
+                row["Run"] = run_i
+                row["Seed"] = seed
+                row["RiskMode"] = risk_mode
+                rows.append(row)
+
+    return pd.DataFrame(rows)
+
+
+# ─── Imbalanced prevalence evaluation ─────────────────────────────────────────
+
+def run_prevalence_sweep(
+    num_samples: int = 200,
+    budget_ratio: float = BUDGET_RATIO,
+    vuln_ratios: List[float] | None = None,
+    n_runs: int = 10,
+    base_seed: int = 0,
+    dataset: str = "devign",
+    agent: SLMAuditAgent | None = None,
+    pool_size: int = 500,
+    risk_mode: str | None = None,
+) -> pd.DataFrame:
+    """
+    Evaluate at realistic, imbalanced vulnerability prevalence levels.
+    Sweeps vuln_ratio ∈ {5%, 10%, 20%, 50%} to report precision–recall
+    trade-offs at CI-relevant operating points.
+    """
+    import random as _r
+    if risk_mode is None:
+        risk_mode = RISK_MODE
+
+    if vuln_ratios is None:
+        vuln_ratios = [0.05, 0.10, 0.20, 0.50]
+
+    pool_size = max(pool_size, num_samples * 3)
+    _r.seed(base_seed)
+    pool = load_samples(n=pool_size, dataset=dataset)
+    vuln_pool = [s for s in pool if s["label"] == 1]
+    clean_pool = [s for s in pool if s["label"] == 0]
+
+    _agent = agent if agent is not None else SLMAuditAgent(mode="mock")
+    rows = []
+
+    for vr in vuln_ratios:
+        n_vuln = max(1, int(num_samples * vr))
+        n_clean = num_samples - n_vuln
+        for run_i in range(n_runs):
+            seed = base_seed + run_i
+            _r.seed(seed)
+            run_vuln = _r.sample(vuln_pool, min(n_vuln, len(vuln_pool)))
+            run_clean = _r.sample(clean_pool, min(n_clean, len(clean_pool)))
+            run_list = run_vuln + run_clean
+            _r.shuffle(run_list)
+            samples = [dict(s, id=idx) for idx, s in enumerate(run_list)]
+            all_chunks = profile_samples(samples, risk_mode=risk_mode)
+            sample_label_map = {s["id"]: s["label"] for s in samples}
+
+            for name, selector_fn in STRATEGIES.items():
+                _r.seed(seed)
+                row = _evaluate_strategy(
+                    name, selector_fn, all_chunks, sample_label_map,
+                    samples, budget_ratio, _agent,
+                )
+                row["Run"] = run_i
+                row["VulnRatio"] = vr
+                rows.append(row)
+
+    return pd.DataFrame(rows)
 
 
 # ─── CLI ──────────────────────────────────────────────────────────────────────

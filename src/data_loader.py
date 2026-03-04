@@ -234,14 +234,22 @@ def load_samples(
     n: int       = NUM_SAMPLES,
     use_hf: bool = True,
     dataset: str = USE_DATASET,   # "devign" | "bigvul" | "swebench" | "combined"
+    vuln_ratio: float = 0.50,
 ) -> List[Dict]:
     """
     Return n balanced samples from the chosen dataset(s).
     Checks local JSON cache first; downloads from HF on cache miss.
     Falls back to tiny synthetic set if HF is unavailable.
+
+    Parameters
+    ----------
+    vuln_ratio : float
+        Fraction of samples that should be vulnerable.
+        0.50 = balanced (default), 0.10 = realistic imbalanced.
     """
     CACHE_DIR.mkdir(exist_ok=True)
-    cache_file = CACHE_DIR / f"samples_{dataset}_{n}.json"
+    vr_tag = f"_vr{int(vuln_ratio*100)}" if vuln_ratio != 0.50 else ""
+    cache_file = CACHE_DIR / f"samples_{dataset}_{n}{vr_tag}.json"
 
     if cache_file.exists():
         print(f"[data_loader] Loading {n} samples from cache: {cache_file}")

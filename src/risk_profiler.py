@@ -21,6 +21,9 @@ from src.config import (
     DANGER_KEYWORDS,
     DEFAULT_Ud,
     DEFAULT_Ld,
+    RISK_MODE,
+    SAST_SIM_TPR,
+    SAST_SIM_FPR,
 )
 
 
@@ -162,11 +165,28 @@ def _compute_risk(chunk: str) -> float:
 # is preserved — the SSG LP uses this variation to prioritise dangerous chunks.
 _SAST_RISK_FLOOR = 0.40
 
+# ─── Simulated SAST oracle ───────────────────────────────────────────────────
+import random as _rand
+
+def _sast_simulated_flag(ground_truth_label: int, seed: int = None) -> bool:
+    """
+    Simulate a realistic SAST tool with configurable TPR / FPR.
+    Returns True if the simulated SAST flags this function.
+    Uses a seeded RNG for reproducibility when seed is provided.
+    """
+    rng = _rand.Random(seed)
+    if ground_truth_label == 1:
+        return rng.random() < SAST_SIM_TPR
+    else:
+        return rng.random() < SAST_SIM_FPR
+
 
 def profile_code(
     code: str,
     ground_truth_label: int = 0,
     chunk_tokens: int = CHUNK_TOKEN_SIZE,
+    risk_mode: str | None = None,
+    sast_seed: int | None = None,
 ) -> List[Dict]:
     """
     Returns a list of chunk dicts:
@@ -174,25 +194,41 @@ def profile_code(
         "chunk_id":   int,
         "text":       str,
         "tokens":     int,
-        "risk":       float,   # effective risk ∈ [0,1] (heuristic + SAST prior)
+        "risk":       float,   # effective risk ∈ [0,1]
         "Ud":         float,   # reward for catching bug
         "Ld":         float,   # penalty for missing bug
         "label":      int,     # ground truth (0/1)
       }
 
-    Effective risk = max(heuristic_risk, _SAST_RISK_FLOOR) for label=1 functions.
-    This ensures that LSP payoffs and mock-SLM detection probabilities both
-    reflect the SAST tool's confidence, so SSG can concentrate the token budget
-    on genuinely high-risk functions rather than superficially keyword-heavy ones.
+    Risk modes:
+      "oracle"    — uses ground_truth_label to apply SAST floor (upper bound,
+                    causes label leakage — use only as ablation reference)
+      "heuristic" — pure keyword + structural scoring, NO label info
+                    (realistic deployment scenario)
+      "sast_sim"  — simulated SAST with configurable TPR/FPR; the SAST
+                    flag is a noisy signal that does NOT use ground truth
+                    directly in the selection path
     """
+    if risk_mode is None:
+        risk_mode = RISK_MODE
+
     chunks = chunk_code(code, chunk_tokens)
     results = []
+
+    # ── Determine SAST flag (only for oracle / sast_sim modes) ────────────
+    sast_flagged = False
+    if risk_mode == "oracle":
+        sast_flagged = (ground_truth_label == 1)
+    elif risk_mode == "sast_sim":
+        sast_flagged = _sast_simulated_flag(ground_truth_label, seed=sast_seed)
+    # risk_mode == "heuristic": sast_flagged stays False (no label info)
+
     for i, chunk_text in enumerate(chunks):
         heuristic_risk = _compute_risk(chunk_text)
         attacker_score = _attacker_attractiveness(chunk_text)
 
-        # ── SAST-oracle prior ──────────────────────────────────────────────
-        if ground_truth_label == 1:
+        # ── Effective risk ─────────────────────────────────────────────────
+        if sast_flagged:
             effective_risk = max(heuristic_risk, _SAST_RISK_FLOOR)
         else:
             effective_risk = heuristic_risk
@@ -224,7 +260,8 @@ def profile_code(
     return results
 
 
-def profile_samples(samples: List[Dict], chunk_tokens: int | None = None) -> List[Dict]:
+def profile_samples(samples: List[Dict], chunk_tokens: int | None = None,
+                    risk_mode: str | None = None) -> List[Dict]:
     """
     Given a list of dataset samples (from data_loader), produce a flat list
     of all chunk dicts with an extra "sample_id" key.
@@ -235,11 +272,17 @@ def profile_samples(samples: List[Dict], chunk_tokens: int | None = None) -> Lis
         Override for chunk size in tokens.  When None, reads the current value
         of ``CHUNK_TOKEN_SIZE`` from ``src.config`` at call-time (not import-time)
         so that runtime config changes (e.g. chunk-size ablation) take effect.
+    risk_mode : str or None
+        Override for risk mode ("oracle", "heuristic", "sast_sim").
+        When None, reads from ``src.config.RISK_MODE``.
     """
     if chunk_tokens is None:
         # Read at call-time to pick up runtime config changes
         from src import config as _cfg
         chunk_tokens = _cfg.CHUNK_TOKEN_SIZE
+    if risk_mode is None:
+        from src import config as _cfg
+        risk_mode = _cfg.RISK_MODE
 
     all_chunks = []
     for sample in samples:
@@ -247,6 +290,8 @@ def profile_samples(samples: List[Dict], chunk_tokens: int | None = None) -> Lis
             code=sample["code"],
             ground_truth_label=sample["label"],
             chunk_tokens=chunk_tokens,
+            risk_mode=risk_mode,
+            sast_seed=sample.get("id", 0),  # reproducible per-sample SAST sim
         )
         for c in chunks:
             c["sample_id"] = sample["id"]

@@ -21,7 +21,7 @@ import numpy as np
 from typing import List, Dict, Tuple
 from scipy.optimize import linprog, OptimizeResult
 
-from src.config import BUDGET_RATIO
+from src.config import BUDGET_RATIO, SELECTION_MODE
 
 
 # ─── Helpers ──────────────────────────────────────────────────────────────────
@@ -186,22 +186,41 @@ def solve_stackelberg_minimax(
 def select_chunks_ssg(
     chunks: List[Dict],
     budget_ratio: float = BUDGET_RATIO,
+    selection_mode: str | None = None,
 ) -> Tuple[List[Dict], List[float]]:
     """
     Run the Stackelberg minimax solver and return the chunks selected
     (deterministically sampled from p*) and their probabilities.
+
+    Selection modes:
+      "knapsack" — p*-weighted value-density per token: priority_i = p*_i · Ud_i · ρ_i / τ_i
+                   This is the theoretically justified conversion from mixed strategy p*
+                   to a deterministic greedy ranking that respects both the LP allocation
+                   AND the token cost of each chunk (knapsack-aware rounding).
+      "priority" — pure p* as priority (original method, kept for ablation).
     """
+    if selection_mode is None:
+        selection_mode = SELECTION_MODE
+
     p_star, _ = solve_stackelberg_minimax(chunks, budget_ratio)
     costs      = _build_cost_vector(chunks)
     budget     = _effective_budget(costs, budget_ratio)
 
-    # Deterministic selection: pick chunks by LP-optimal probability p*.
-    # p* already encodes the game-theoretic allocation (Ud + Ld tradeoff),
-    # so we use it directly as priority.  Tiny Ud*risk tiebreaker avoids
-    # arbitrary ordering among chunks with equal p*.
-    tiebreak = 1e-8 * np.array([c["Ud"] * c["risk"] for c in chunks])
-    priority = p_star + tiebreak
-    order    = np.argsort(-priority)
+    if selection_mode == "knapsack":
+        # Knapsack-aware: p*-weighted marginal utility per token.
+        # This principled conversion from mixed → deterministic selection
+        # respects both the game-theoretic allocation (p*) and the
+        # token cost (τi), addressing the fractional knapsack rounding
+        # problem identified in the SSG-to-greedy conversion.
+        payoff = np.array([c["Ud"] * c["risk"] for c in chunks], dtype=float)
+        # priority_i = p*_i * payoff_i / cost_i  (value density weighted by LP prob)
+        priority = (p_star * payoff) / np.maximum(costs, 1.0)
+    else:
+        # Original: pure p* priority with tiny tiebreak
+        tiebreak = 1e-8 * np.array([c["Ud"] * c["risk"] for c in chunks])
+        priority = p_star + tiebreak
+
+    order = np.argsort(-priority)
 
     selected, used_tokens = [], 0.0
     for idx in order:
