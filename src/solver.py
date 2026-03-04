@@ -139,15 +139,20 @@ def solve_stackelberg_minimax(
     c_obj[-1] = -1.0  # -v
 
     # Constraints:
-    # 1) Minimax:  for each j:  p_j * Ld_j - sum_i p_i * Ud_i + v <= 0
+    # 1) Minimax: for each attacker pure-strategy j (attack chunk j):
+    #    Defender utility = sum_i p_i*Ud_i + p_j*Ld_j - Ld_j
+    #    The p_j*Ld_j term REWARDS covering the attacked target (catches attacker).
+    #    The -Ld_j constant is the base loss from any attack.
+    #    Constraint (>= v form): sum_i p_i*Ud_i + p_j*Ld_j - Ld_j >= v
+    #    Converted to <= form:  -sum_i p_i*Ud_i - p_j*Ld_j + v <= -Ld_j
     A_minimax = []
     b_minimax = []
     for j in range(n):
         row = -Ud.copy()         # - Ud_i * p_i  for all i
-        row[j] += Ld[j]          # + Ld_j * p_j
+        row[j] -= Ld[j]          # - Ld_j * p_j  (covering j helps defender)
         row_ext = np.append(row, 1.0)   # + v
         A_minimax.append(row_ext)
-        b_minimax.append(0.0)
+        b_minimax.append(-Ld[j])  # RHS = -Ld_j (base loss constant)
 
     # 2) Budget: costs^T p <= B
     budget_row = np.append(costs, 0.0)
@@ -190,8 +195,12 @@ def select_chunks_ssg(
     costs      = _build_cost_vector(chunks)
     budget     = _effective_budget(costs, budget_ratio)
 
-    # Greedy deterministic selection: pick chunks sorted by p_star * Ud * risk
-    priority = p_star * np.array([c["Ud"] * c["risk"] for c in chunks])
+    # Deterministic selection: pick chunks by LP-optimal probability p*.
+    # p* already encodes the game-theoretic allocation (Ud + Ld tradeoff),
+    # so we use it directly as priority.  Tiny Ud*risk tiebreaker avoids
+    # arbitrary ordering among chunks with equal p*.
+    tiebreak = 1e-8 * np.array([c["Ud"] * c["risk"] for c in chunks])
+    priority = p_star + tiebreak
     order    = np.argsort(-priority)
 
     selected, used_tokens = [], 0.0

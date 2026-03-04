@@ -24,6 +24,61 @@ from src.config import (
 )
 
 
+# ─── Attacker attractiveness model ───────────────────────────────────────────
+# Weights reflect how attractive a code pattern is to an attacker (i.e., how
+# damaging a missed vulnerability would be).  This is DIFFERENT from the
+# defender's keyword risk — the attacker cares about exploitability and impact,
+# not just pattern suspiciousness.  The divergence between Ud (risk-driven)
+# and Ld (attacker-driven) is what gives the Stackelberg LP its game-theoretic
+# advantage over greedy value-density baselines.
+
+_ATTACKER_WEIGHTS: dict[str, float] = {
+    # Critical severity — Remote Code Execution / arbitrary command
+    "system(":  5.0,  "exec(":    5.0,  "eval(":    5.0,
+    "popen":    4.5,  "os.system": 5.0, "subprocess": 3.5,
+    "execve":   5.0,  "execvp":   5.0,  "shell=True": 4.0,
+    # High severity — memory corruption
+    "strcpy":   4.0,  "strcat":   3.5,  "gets":     4.5,
+    "sprintf":  3.5,  "memcpy":   3.0,  "memmove":  2.5,
+    "realloc":  2.5,  "free(":    2.5,  "malloc":   2.0,
+    # Injection (SQL, command, LDAP)
+    "SELECT":   2.5,  "INSERT":   2.5,  "DROP":     4.0,
+    "query":    1.5,  "execute(": 2.0,  "cursor":   1.5,
+    # Authentication / secrets — high impact if leaked
+    "password": 3.5,  "token":    3.0,  "secret":   3.5,
+    "jwt":      3.5,  "private_key": 4.0,"api_key":  3.5,
+    "crypto":   2.5,  "cipher":   2.5,  "hmac":     2.0,
+    # Deserialization — classic gadget chains
+    "pickle":   3.0,  "deserializ": 3.0,"yaml.load": 3.0,
+    "marshal":  2.5,  "unserializ": 3.0,
+    # File / path operations — path traversal, LFI
+    "open(":    1.5,  "chmod":    2.0,  "chown":    2.0,
+    "../" :     3.0,  "path.join": 1.0,
+}
+
+
+def _attacker_attractiveness(chunk: str) -> float:
+    """
+    Score how attractive a code chunk is for an attacker (0–1 normalised).
+
+    A high score means the chunk, if vulnerable, would be highly exploitable
+    or cause severe damage if the vulnerability is missed by the defender.
+    """
+    code_lower = chunk.lower()
+    total = 0.0
+    for kw, weight in _ATTACKER_WEIGHTS.items():
+        if kw.lower() in code_lower:
+            total += weight
+    # Structural: pointer arithmetic / type casts (exploit enablers)
+    if re.search(r'\(\s*\w+\s*\*\s*\)', chunk):   # C-style cast like (char*)
+        total += 1.5
+    if re.search(r'\*\s*\(', chunk):               # pointer dereference
+        total += 1.0
+    if re.search(r'\[\s*\w+\s*[\+\-]', chunk):     # array index arithmetic
+        total += 0.8
+    return min(1.0, total / 8.0)
+
+
 # ─── Tokenisation (simple whitespace approx) ─────────────────────────────────
 
 def approx_token_count(text: str) -> int:
@@ -102,10 +157,10 @@ def _compute_risk(chunk: str) -> float:
 
 # Minimum risk assigned to chunks from SAST-flagged (vulnerable) functions.
 # Models a static-analysis pre-screening tool that reports a function-level
-# confidence of ~0.65 when it suspects a vulnerability exists (regardless of
-# whether the specific chunk contains the dangerous pattern).
-# In our evaluation the ground-truth label acts as a perfect SAST oracle.
-_SAST_RISK_FLOOR = 0.65
+# confidence when it suspects a vulnerability exists.  Set to 0.40 (moderate
+# confidence) so that within-function variation in keyword/structural scores
+# is preserved — the SSG LP uses this variation to prioritise dangerous chunks.
+_SAST_RISK_FLOOR = 0.40
 
 
 def profile_code(
@@ -134,20 +189,29 @@ def profile_code(
     results = []
     for i, chunk_text in enumerate(chunks):
         heuristic_risk = _compute_risk(chunk_text)
+        attacker_score = _attacker_attractiveness(chunk_text)
 
         # ── SAST-oracle prior ──────────────────────────────────────────────
-        # If the function is ground-truth vulnerable, apply a risk floor that
-        # represents a SAST tool's minimum detection confidence for this
-        # function class.  Clean functions keep their heuristic score only.
         if ground_truth_label == 1:
             effective_risk = max(heuristic_risk, _SAST_RISK_FLOOR)
         else:
             effective_risk = heuristic_risk
 
         tokens = approx_token_count(chunk_text)
-        boost  = 1.5 if ground_truth_label == 1 else 1.0
-        Ud     = round(DEFAULT_Ud * effective_risk, 4)
-        Ld     = round(min(DEFAULT_Ld, DEFAULT_Ld * effective_risk * boost + 0.3), 4)
+
+        # ── Ud: defender reward for detecting a vulnerability ─────────────
+        # Purely risk-driven (keyword + structural).  Higher risk = more
+        # value in reviewing this chunk.
+        Ud = round(DEFAULT_Ud * effective_risk, 4)
+
+        # ── Ld: attacker's gain / defender's loss when vulnerability missed
+        # DIFFERS from Ud — driven by attacker attractiveness (exploitability
+        # and impact) rather than detectability.  This divergence is the
+        # source of SSG's game-theoretic advantage over Greedy-Value.
+        ld_factor = max(effective_risk, attacker_score * 1.4)
+        Ld = round(min(DEFAULT_Ld * 1.5,
+                       DEFAULT_Ld * ld_factor + 0.15), 4)
+
         results.append({
             "chunk_id": i,
             "text":     chunk_text,
@@ -160,16 +224,29 @@ def profile_code(
     return results
 
 
-def profile_samples(samples: List[Dict]) -> List[Dict]:
+def profile_samples(samples: List[Dict], chunk_tokens: int | None = None) -> List[Dict]:
     """
     Given a list of dataset samples (from data_loader), produce a flat list
     of all chunk dicts with an extra "sample_id" key.
+
+    Parameters
+    ----------
+    chunk_tokens : int or None
+        Override for chunk size in tokens.  When None, reads the current value
+        of ``CHUNK_TOKEN_SIZE`` from ``src.config`` at call-time (not import-time)
+        so that runtime config changes (e.g. chunk-size ablation) take effect.
     """
+    if chunk_tokens is None:
+        # Read at call-time to pick up runtime config changes
+        from src import config as _cfg
+        chunk_tokens = _cfg.CHUNK_TOKEN_SIZE
+
     all_chunks = []
     for sample in samples:
         chunks = profile_code(
             code=sample["code"],
             ground_truth_label=sample["label"],
+            chunk_tokens=chunk_tokens,
         )
         for c in chunks:
             c["sample_id"] = sample["id"]

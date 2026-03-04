@@ -272,9 +272,10 @@ def run_chunk_size_ablation(
                 _r.sample(clean_pool, min(half, len(clean_pool)))
             )
             samples = [dict(s, id=idx) for idx, s in enumerate(run_list)]
-            # Re-profile with new chunk size
+            # Re-profile with new chunk size — pass explicitly so the
+            # import-time default is bypassed.
             from src import risk_profiler as _rp
-            all_chunks = _rp.profile_samples(samples)
+            all_chunks = _rp.profile_samples(samples, chunk_tokens=cs)
             sample_label_map = {s["id"]: s["label"] for s in samples}
             _agent = agent if agent is not None else SLMAuditAgent(mode="mock")
             for name, selector_fn in STRATEGIES.items():
